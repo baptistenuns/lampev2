@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lava Lamp (Canvas)</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: radial-gradient(1200px 800px at 50% 20%, #14162a, #060712 60%, #02030a);
+      overflow: hidden;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Apple Color Emoji","Segoe UI Emoji";
+    }
+    .wrap {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-items: center;
+    }
+    canvas { display: block; }
+
+    /* simple UI */
+    .hud{
+      position: fixed;
+      left: 16px;
+      bottom: 16px;
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.08);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      font-size: 13px;
+      color: rgba(255,255,255,0.85);
+      user-select: none;
+    }
+    .hud kbd{
+      padding: 2px 6px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.18);
+      background: rgba(0,0,0,0.25);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <canvas id="c"></canvas>
+  </div>
+
+  <div class="hud">
+    <div><strong>Lampe à lave</strong> — Canvas metaballs</div>
+    <div>Touches : <kbd>+</kbd>/<kbd>-</kbd> (blobs) · <kbd>R</kbd> (reset) · <kbd>Space</kbd> (pause)</div>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d", { alpha: true });
+
+  // --- Scene sizing (lamp body in the center) ---
+  let W = 0, H = 0, DPR = 1;
+
+  function resize() {
+    DPR = Math.min(2, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + "px";
+    canvas.style.height = H + "px";
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  // --- Lamp geometry ---
+  function lampRect() {
+    const lampW = Math.min(360, W * 0.42);
+    const lampH = Math.min(760, H * 0.78);
+    const x = (W - lampW) / 2;
+    const y = (H - lampH) / 2;
+    return { x, y, w: lampW, h: lampH };
+  }
+
+  // --- Metaballs field rendering (CPU, optimized enough for this use) ---
+  // We'll render the field on a lower-res buffer then scale up.
+  const fieldCanvas = document.createElement("canvas");
+  const fctx = fieldCanvas.getContext("2d", { willReadFrequently: true });
+
+  let fieldScale = 0.55; // lower = faster; higher = sharper
+  let paused = false;
+
+  // --- Blobs (particles) ---
+  let blobs = [];
+  let targetBlobCount = 12;
+
+  const rand = (a, b) => a + Math.random() * (b - a);
+
+  function resetBlobs(count = targetBlobCount) {
+    blobs.length = 0;
+    const L = lampRect();
+    const cx = L.x + L.w / 2;
+    const bottom = L.y + L.h - 90;
+    const top = L.y + 90;
+
+    for (let i = 0; i < count; i++) {
+      const r = rand(L.w * 0.07, L.w * 0.13);
+      const x = cx + rand(-L.w * 0.18, L.w * 0.18);
+      const y = rand(top, bottom);
+      const vy = rand(-0.15, 0.2);
+      const vx = rand(-0.12, 0.12);
+      blobs.push({
+        x, y, vx, vy,
+        r,
+        heat: rand(0.2, 1.0), // affects buoyancy
+        wob: rand(0, Math.PI * 2)
+      });
+    }
+  }
+  resetBlobs();
+
+  // --- Simple “lava lamp” physics ---
+  function step(dt) {
+    const L = lampRect();
+    const cx = L.x + L.w / 2;
+    const top = L.y + 70;
+    const bottom = L.y + L.h - 70;
+
+    for (const b of blobs) {
+      b.wob += dt * 0.9;
+
+      // Buoyancy: hot blobs tend to rise, cold blobs fall a bit
+      const buoy = (-0.22 * b.heat + 0.10 * (1 - b.heat));
+      // Heat cycles slowly -> gives the rising/falling alternation
+      b.heat = 0.5 + 0.5 * Math.sin((performance.now() * 0.00022) + b.wob);
+      const ay = buoy;
+
+      // Gentle horizontal drift around center
+      const dx = (b.x - cx) / (L.w * 0.5);
+      const ax = (-dx) * 0.04 + Math.sin(b.wob * 1.1) * 0.015;
+
+      b.vx += ax * dt;
+      b.vy += ay * dt;
+
+      // Damping
+      b.vx *= (1 - 0.0025 * dt);
+      b.vy *= (1 - 0.0020 * dt);
+
+      b.x += b.vx * dt * 60;
+      b.y += b.vy * dt * 60;
+
+      // Soft boundary constraints inside lamp (rounded capsule)
+      // We'll push blobs back if they go too far.
+      const pad = 10 + b.r * 0.25;
+      const minX = L.x + pad;
+      const maxX = L.x + L.w - pad;
+      const minY = top + pad;
+      const maxY = bottom - pad;
+
+      if (b.x < minX) { b.x = minX; b.vx = Math.abs(b.vx) * 0.8; }
+      if (b.x > maxX) { b.x = maxX; b.vx = -Math.abs(b.vx) * 0.8; }
+
+      if (b.y < minY) { b.y = minY; b.vy = Math.abs(b.vy) * 0.6; }
+      if (b.y > maxY) { b.y = maxY; b.vy = -Math.abs(b.vy) * 0.6; }
+
+      // Slight size pulsing
+      const base = b.r;
+      b.r = base * (0.96 + 0.06 * Math.sin(b.wob * 1.6));
+    }
+  }
+
+  // --- Render lamp + metaballs ---
+  function draw() {
+    const L = lampRect();
+
+    // Clear
+    ctx.clearRect(0, 0, W, H);
+
+    // Lamp shadow / stand
+    ctx.save();
+    ctx.translate(0, 0);
+
+    // base glow
+    const baseGlow = ctx.createRadialGradient(
+      L.x + L.w/2, L.y + L.h - 30, 10,
+      L.x + L.w/2, L.y + L.h - 30, L.w*0.9
+    );
+    baseGlow.addColorStop(0, "rgba(255,140,70,0.22)");
+    baseGlow.addColorStop(1, "rgba(255,140,70,0)");
+    ctx.fillStyle = baseGlow;
+    ctx.fillRect(0, 0, W, H);
+
+    // Stand
+    ctx.fillStyle = "rgba(255,255,255,0.08)";
+    roundRect(ctx, L.x + L.w*0.18, L.y + L.h - 36, L.w*0.64, 14, 7);
+    ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,0.10)";
+    roundRect(ctx, L.x + L.w*0.25, L.y + L.h - 22, L.w*0.50, 10, 6);
+    ctx.fill();
+
+    // Cap
+    ctx.fillStyle = "rgba(255,255,255,0.08)";
+    roundRect(ctx, L.x + L.w*0.22, L.y + 12, L.w*0.56, 16, 8);
+    ctx.fill();
+    ctx.restore();
+
+    // Clip to lamp body (rounded capsule)
+    ctx.save();
+    capsuleClip(ctx, L.x, L.y + 30, L.w, L.h - 70, L.w * 0.22);
+
+    // Glass background gradient
+    const g = ctx.createLinearGradient(0, L.y, 0, L.y + L.h);
+    g.addColorStop(0, "rgba(140,170,255,0.10)");
+    g.addColorStop(0.5, "rgba(40,60,120,0.06)");
+    g.addColorStop(1, "rgba(10,15,40,0.10)");
+    ctx.fillStyle = g;
+    ctx.fillRect(L.x, L.y, L.w, L.h);
+
+    // Render metaballs field to offscreen buffer
+    renderField(L);
+
+    // Draw field upscaled
+    ctx.globalCompositeOperation = "screen";
+    ctx.drawImage(fieldCanvas, L.x, L.y + 30, L.w, L.h - 70);
+    ctx.globalCompositeOperation = "source-over";
+
+    // Glass highlights
+    const hg = ctx.createLinearGradient(L.x, 0, L.x + L.w, 0);
+    hg.addColorStop(0.00, "rgba(255,255,255,0.00)");
+    hg.addColorStop(0.15, "rgba(255,255,255,0.10)");
+    hg.addColorStop(0.25, "rgba(255,255,255,0.04)");
+    hg.addColorStop(0.55, "rgba(255,255,255,0.00)");
+    hg.addColorStop(0.75, "rgba(255,255,255,0.06)");
+    hg.addColorStop(0.88, "rgba(255,255,255,0.02)");
+    hg.addColorStop(1.00, "rgba(255,255,255,0.00)");
+    ctx.fillStyle = hg;
+    ctx.fillRect(L.x, L.y + 30, L.w, L.h - 70);
+
+    ctx.restore();
+
+    // Outline of glass
+    ctx.save();
+    ctx.strokeStyle = "rgba(255,255,255,0.20)";
+    ctx.lineWidth = 1;
+    roundCapsuleStroke(ctx, L.x, L.y + 30, L.w, L.h - 70, L.w * 0.22);
+    ctx.restore();
+  }
+
+  function renderField(L) {
+    const fw = Math.max(140, Math.floor(L.w * fieldScale));
+    const fh = Math.max(260, Math.floor((L.h - 70) * fieldScale));
+
+    if (fieldCanvas.width !== fw || fieldCanvas.height !== fh) {
+      fieldCanvas.width = fw;
+      fieldCanvas.height = fh;
+    }
+
+    // Compute scalar field: sum(r^2 / d^2)
+    // Threshold defines the "surface".
+    const img = fctx.createImageData(fw, fh);
+    const data = img.data;
+
+    // Map blobs to field-space
+    const bx = (x) => (x - L.x) / L.w * fw;
+    const by = (y) => (y - (L.y + 30)) / (L.h - 70) * fh;
+    const br = (r) => r / L.w * fw;
+
+    // Tunables
+    const threshold = 1.05; // higher = smaller blobs
+    const softness = 0.22;  // edge softness
+
+    for (let y = 0; y < fh; y++) {
+      for (let x = 0; x < fw; x++) {
+        let v = 0;
+
+        for (const b of blobs) {
+          const px = bx(b.x);
+          const py = by(b.y);
+          const rr = br(b.r);
+          const dx = x - px;
+          const dy = y - py;
+          const d2 = dx*dx + dy*dy + 0.0001;
+          v += (rr*rr) / d2;
+        }
+
+        // Soft threshold -> alpha
+        const t = (v - threshold) / softness;
+        const a = clamp(t, 0, 1);
+
+        const idx = (y*fw + x) * 4;
+
+        if (a <= 0) {
+          data[idx+3] = 0;
+          continue;
+        }
+
+        // Color gradient (warm lava)
+        // Use v to vary color: hotter core -> brighter
+        const heat = clamp((v - threshold) * 0.9, 0, 1);
+
+        // Base warm palette (no hard-coded “style”, just consistent lamp colors)
+        const R = 255;
+        const G = Math.floor(90 + 120 * heat);
+        const B = Math.floor(40 + 60 * (1 - heat));
+
+        data[idx]   = R;
+        data[idx+1] = G;
+        data[idx+2] = B;
+        data[idx+3] = Math.floor(255 * a);
+      }
+    }
+
+    fctx.putImageData(img, 0, 0);
+
+    // Add blur glow by drawing a scaled copy over itself
+    fctx.save();
+    fctx.globalCompositeOperation = "screen";
+    fctx.globalAlpha = 0.35;
+    fctx.drawImage(fieldCanvas, -2, -2, fw+4, fh+4);
+    fctx.globalAlpha = 0.22;
+    fctx.drawImage(fieldCanvas, -4, -4, fw+8, fh+8);
+    fctx.restore();
+  }
+
+  // --- Helpers ---
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+  function roundRect(ctx, x, y, w, h, r) {
+    const rr = Math.min(r, w/2, h/2);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rr);
+    ctx.arcTo(x + w, y + h, x, y + h, rr);
+    ctx.arcTo(x, y + h, x, y, rr);
+    ctx.arcTo(x, y, x + w, y, rr);
+    ctx.closePath();
+  }
+
+  function capsuleClip(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    const rr = Math.min(r, w/2, h/2);
+    // top arc
+    ctx.moveTo(x + rr, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rr);
+    ctx.arcTo(x + w, y + h, x, y + h, rr);
+    ctx.arcTo(x, y + h, x, y, rr);
+    ctx.arcTo(x, y, x + w, y, rr);
+    ctx.closePath();
+    ctx.clip();
+  }
+
+  function roundCapsuleStroke(ctx, x, y, w, h, r) {
+    const rr = Math.min(r, w/2, h/2);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rr);
+    ctx.arcTo(x + w, y + h, x, y + h, rr);
+    ctx.arcTo(x, y + h, x, y, rr);
+    ctx.arcTo(x, y, x + w, y, rr);
+    ctx.closePath();
+    ctx.stroke();
+  }
+
+  // --- Controls ---
+  window.addEventListener("keydown", (e) => {
+    if (e.key === " "){ paused = !paused; e.preventDefault(); }
+    if (e.key === "r" || e.key === "R") resetBlobs(targetBlobCount);
+    if (e.key === "+" || e.key === "=") {
+      targetBlobCount = Math.min(24, targetBlobCount + 1);
+      resetBlobs(targetBlobCount);
+    }
+    if (e.key === "-" || e.key === "_") {
+      targetBlobCount = Math.max(4, targetBlobCount - 1);
+      resetBlobs(targetBlobCount);
+    }
+  });
+
+  // Click to add a blob
+  window.addEventListener("pointerdown", (e) => {
+    const L = lampRect();
+    const inside = e.clientX >= L.x && e.clientX <= L.x + L.w && e.clientY >= L.y && e.clientY <= L.y + L.h;
+    if (!inside) return;
+    const r = rand(L.w * 0.07, L.w * 0.14);
+    blobs.push({
+      x: e.clientX,
+      y: e.clientY,
+      vx: rand(-0.15, 0.15),
+      vy: rand(-0.10, 0.10),
+      r,
+      heat: rand(0.2, 1.0),
+      wob: rand(0, Math.PI * 2)
+    });
+    targetBlobCount = blobs.length;
+  });
+
+  // --- Animation loop ---
+  let last = performance.now();
+  function loop(now) {
+    const dt = clamp((now - last) / 16.6667, 0.2, 2.2); // normalized frames
+    last = now;
+
+    if (!paused) step(dt);
+    draw();
+
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
